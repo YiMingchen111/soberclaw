@@ -43,14 +43,17 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 @app.get("/api/health")
 async def health():
+    from services.ai_analyzer import get_active_provider
+    provider = get_active_provider()
     return {
         "status": "ok",
         "version": "1.0.0",
+        "ai_provider": provider,
         "features": {
-            "whisper":    True,
-            "claude_ai":  bool(os.getenv("ANTHROPIC_API_KEY")),
-            "edge_tts":   True,
-            "ffmpeg":     True,
+            "whisper":  True,
+            "ai":       provider != "none",
+            "edge_tts": True,
+            "ffmpeg":   True,
         }
     }
 

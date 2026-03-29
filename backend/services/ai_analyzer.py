@@ -1,51 +1,68 @@
 """
-AI 分析服务：使用 Whisper 转录 + Claude 识别精彩片段
+AI 分析服务：使用 Whisper 转录 + 多种 AI 大模型识别精彩片段
+
+支持的 AI 提供商（通过环境变量配置）：
+  - Claude (Anthropic):  ANTHROPIC_API_KEY=sk-ant-...
+  - 豆包 (火山引擎):      DOUBAO_API_KEY=xxx  +  DOUBAO_MODEL=ep-xxx（端点ID）
+  - OpenAI / 兼容接口:   OPENAI_API_KEY=sk-...  +  OPENAI_BASE_URL（可选）
+  - 通义千问 (阿里云):    DASHSCOPE_API_KEY=sk-...
+  - 文心一言 (百度):      QIANFAN_API_KEY=...  +  QIANFAN_SECRET_KEY=...（暂通过 OpenAI 兼容）
 """
 import asyncio
 import json
 import os
 import re
-from pathlib import Path
 from typing import List, Optional
-
-import anthropic
 
 from models.schemas import HighlightSegment, CreatorPreferences
 
-
+# ── 读取环境变量 ────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
+DOUBAO_API_KEY    = os.getenv("DOUBAO_API_KEY", "")
+DOUBAO_MODEL      = os.getenv("DOUBAO_MODEL", "")           # 火山引擎端点ID，如 ep-20240xxx
+
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL   = os.getenv("OPENAI_BASE_URL", "")        # 自定义时填写，否则用官方
+OPENAI_MODEL      = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")      # 通义千问
+DASHSCOPE_MODEL   = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
+
+
+def get_active_provider() -> str:
+    """返回当前激活的 AI 提供商名称"""
+    if ANTHROPIC_API_KEY:
+        return "claude"
+    if DOUBAO_API_KEY and DOUBAO_MODEL:
+        return "doubao"
+    if DASHSCOPE_API_KEY:
+        return "qwen"
+    if OPENAI_API_KEY:
+        return "openai"
+    return "none"
+
+
+# ── 转录 ────────────────────────────────────────────────────────────────────
 
 async def transcribe_audio(audio_path: str, language: str = "zh") -> List[dict]:
-    """
-    使用 Whisper 转录音频，返回带时间戳的片段列表
-    返回格式: [{"start": 0.0, "end": 3.2, "text": "..."}, ...]
-    """
+    """使用 Whisper 转录音频，返回带时间戳的片段列表"""
     import whisper
 
     loop = asyncio.get_event_loop()
     model = await loop.run_in_executor(None, lambda: whisper.load_model("base"))
-
     result = await loop.run_in_executor(
         None,
-        lambda: model.transcribe(
-            audio_path,
-            language=language,
-            word_timestamps=False,
-            verbose=False,
-        )
+        lambda: model.transcribe(audio_path, language=language,
+                                  word_timestamps=False, verbose=False)
     )
+    return [
+        {"start": round(s["start"], 2), "end": round(s["end"], 2), "text": s["text"].strip()}
+        for s in result.get("segments", [])
+    ]
 
-    segments = []
-    for seg in result.get("segments", []):
-        segments.append({
-            "start": round(seg["start"], 2),
-            "end":   round(seg["end"], 2),
-            "text":  seg["text"].strip(),
-        })
 
-    return segments
-
+# ── 精彩片段分析 ─────────────────────────────────────────────────────────────
 
 async def analyze_highlights(
     transcript_segments: List[dict],
@@ -55,39 +72,131 @@ async def analyze_highlights(
     max_clip_duration: float = 60.0,
     max_highlights: int = 5,
 ) -> List[HighlightSegment]:
-    """
-    使用 Claude 分析转录文本，识别精彩片段
-    """
-    if not ANTHROPIC_API_KEY:
+    """调用 AI 分析转录文本，识别精彩片段"""
+
+    provider = get_active_provider()
+
+    if provider == "none":
         return _fallback_segment_split(
             transcript_segments, total_duration,
             min_clip_duration, max_clip_duration, max_highlights
         )
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    # 构建转录文本（附带时间戳）
-    transcript_text = "\n".join(
-        f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}"
-        for seg in transcript_segments
+    prompt = _build_prompt(
+        transcript_segments, total_duration, preferences,
+        min_clip_duration, max_clip_duration, max_highlights
     )
 
-    # 构建偏好上下文
+    try:
+        if provider == "claude":
+            raw = await _call_claude(prompt)
+        elif provider == "doubao":
+            raw = await _call_openai_compatible(
+                prompt,
+                api_key=DOUBAO_API_KEY,
+                base_url="https://ark.volcengine.com/api/v3",
+                model=DOUBAO_MODEL,
+            )
+        elif provider == "qwen":
+            raw = await _call_openai_compatible(
+                prompt,
+                api_key=DASHSCOPE_API_KEY,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                model=DASHSCOPE_MODEL,
+            )
+        elif provider == "openai":
+            raw = await _call_openai_compatible(
+                prompt,
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL or None,
+                model=OPENAI_MODEL,
+            )
+        else:
+            raw = ""
+    except Exception as e:
+        print(f"[AI] {provider} 调用失败: {e}，降级为均匀切割")
+        return _fallback_segment_split(
+            transcript_segments, total_duration,
+            min_clip_duration, max_clip_duration, max_highlights
+        )
+
+    return _parse_highlights(raw) or _fallback_segment_split(
+        transcript_segments, total_duration,
+        min_clip_duration, max_clip_duration, max_highlights
+    )
+
+
+# ── 各 Provider 调用实现 ─────────────────────────────────────────────────────
+
+async def _call_claude(prompt: str) -> str:
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+    )
+    return response.content[0].text.strip()
+
+
+async def _call_openai_compatible(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str | None = None,
+) -> str:
+    """
+    通用 OpenAI 兼容接口调用
+    豆包、通义千问、DeepSeek、Kimi 等都支持此格式
+    """
+    from openai import AsyncOpenAI
+
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    client = AsyncOpenAI(**kwargs)
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=2000,
+    )
+    return response.choices[0].message.content.strip()
+
+
+# ── Prompt 构建 ──────────────────────────────────────────────────────────────
+
+def _build_prompt(
+    transcript_segments: List[dict],
+    total_duration: float,
+    preferences: Optional[CreatorPreferences],
+    min_clip_duration: float,
+    max_clip_duration: float,
+    max_highlights: int,
+) -> str:
+    transcript_text = "\n".join(
+        f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}"
+        for s in transcript_segments
+    )
+
     pref_context = ""
     if preferences:
         keywords = "、".join(preferences.highlight_keywords) if preferences.highlight_keywords else "无"
-        pref_context = f"""
-创作偏好：
-- 内容类型：{preferences.category.value}
-- 目标平台：{', '.join(preferences.target_platform)}
-- 关键词重点关注：{keywords}
-- 精彩度阈值：{preferences.min_highlight_score}
-"""
+        pref_context = (
+            f"\n创作偏好：\n"
+            f"- 内容类型：{preferences.category.value}\n"
+            f"- 目标平台：{', '.join(preferences.target_platform)}\n"
+            f"- 关键词重点关注：{keywords}\n"
+            f"- 精彩度阈值：{preferences.min_highlight_score}\n"
+        )
 
-    prompt = f"""你是一位专业的短视频剪辑师，请分析以下视频转录文字，识别出最精彩、最适合做短视频的片段。
+    return f"""你是一位专业的短视频剪辑师，请分析以下视频转录文字，识别出最精彩、最适合做短视频的片段。
 
-视频总时长：{total_duration:.1f}秒
-{pref_context}
+视频总时长：{total_duration:.1f}秒{pref_context}
 
 转录内容（格式：[开始时间 - 结束时间] 文字）：
 {transcript_text}
@@ -120,39 +229,28 @@ async def analyze_highlights(
 - score 要根据内容质量客观评分
 - 只返回 JSON，不要其他文字"""
 
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
-        None,
-        lambda: client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-    )
 
-    raw_text = response.content[0].text.strip()
-
-    # 提取 JSON（可能包含 markdown 代码块）
-    json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+def _parse_highlights(raw: str) -> List[HighlightSegment]:
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not json_match:
-        return _fallback_segment_split(
-            transcript_segments, total_duration,
-            min_clip_duration, max_clip_duration, max_highlights
-        )
+        return []
+    try:
+        data = json.loads(json_match.group())
+        return [
+            HighlightSegment(
+                start=float(h["start"]),
+                end=float(h["end"]),
+                score=float(h.get("score", 0.7)),
+                reason=h.get("reason", "AI推荐"),
+                transcript=h.get("transcript", ""),
+            )
+            for h in data.get("highlights", [])
+        ]
+    except Exception:
+        return []
 
-    data = json.loads(json_match.group())
-    highlights = []
-    for h in data.get("highlights", []):
-        highlights.append(HighlightSegment(
-            start=float(h["start"]),
-            end=float(h["end"]),
-            score=float(h.get("score", 0.7)),
-            reason=h.get("reason", "AI推荐"),
-            transcript=h.get("transcript", ""),
-        ))
 
-    return highlights
-
+# ── 兜底方案 ─────────────────────────────────────────────────────────────────
 
 def _fallback_segment_split(
     segments: List[dict],
@@ -161,10 +259,9 @@ def _fallback_segment_split(
     max_duration: float,
     max_count: int,
 ) -> List[HighlightSegment]:
-    """当没有 API Key 时的兜底方案：均匀切割"""
+    """未配置任何 API Key 时的兜底：按语音段落均匀切割"""
     if not segments:
-        # 完全均匀切割
-        step = min(max_duration, total_duration / max_count)
+        step = min(max_duration, total_duration / max(max_count, 1))
         results = []
         for i in range(max_count):
             start = i * step
@@ -172,72 +269,43 @@ def _fallback_segment_split(
             if end - start < min_duration:
                 break
             results.append(HighlightSegment(
-                start=start, end=end,
-                score=0.5,
-                reason="均匀切割（无API Key）",
-                transcript="",
+                start=start, end=end, score=0.5,
+                reason="均匀切割（未配置AI）", transcript="",
             ))
         return results
 
-    # 按 transcript segment 切割
-    results = []
-    current_start = None
-    current_texts = []
-    current_duration = 0.0
-
+    results, current_start, current_texts, current_dur = [], None, [], 0.0
     for seg in segments:
         if current_start is None:
             current_start = seg["start"]
-
-        seg_dur = seg["end"] - seg["start"]
-        current_duration += seg_dur
+        current_dur += seg["end"] - seg["start"]
         current_texts.append(seg["text"])
-
-        if current_duration >= min_duration:
+        if current_dur >= min_duration:
             results.append(HighlightSegment(
-                start=current_start,
-                end=seg["end"],
-                score=0.6,
-                reason="自动切割",
-                transcript=" ".join(current_texts),
+                start=current_start, end=seg["end"], score=0.6,
+                reason="自动切割", transcript=" ".join(current_texts),
             ))
             if len(results) >= max_count:
                 break
-            current_start = None
-            current_texts = []
-            current_duration = 0.0
-
+            current_start, current_texts, current_dur = None, [], 0.0
     return results
 
+
+# ── 字幕提取 ─────────────────────────────────────────────────────────────────
 
 async def generate_subtitle_text(
     transcript_segments: List[dict],
     clip_start: float,
     clip_end: float,
 ) -> List[dict]:
-    """
-    从转录数据中提取指定时间范围内的字幕
-    返回相对时间（相对于切片起始点）
-    """
-    subtitle_segs = []
+    """从转录数据中提取指定时间范围内的字幕（转为相对时间）"""
+    result = []
     for seg in transcript_segments:
-        # 找出与切片有交集的 segment
-        seg_start = seg["start"]
-        seg_end   = seg["end"]
-
-        if seg_end <= clip_start or seg_start >= clip_end:
+        if seg["end"] <= clip_start or seg["start"] >= clip_end:
             continue
-
-        # 裁剪到切片范围，转为相对时间
-        rel_start = max(seg_start, clip_start) - clip_start
-        rel_end   = min(seg_end, clip_end) - clip_start
-        text      = seg["text"].strip()
-
+        rel_start = round(max(seg["start"], clip_start) - clip_start, 2)
+        rel_end   = round(min(seg["end"],   clip_end)   - clip_start, 2)
+        text = seg["text"].strip()
         if text and rel_end > rel_start:
-            subtitle_segs.append({
-                "start": round(rel_start, 2),
-                "end":   round(rel_end, 2),
-                "text":  text,
-            })
-
-    return subtitle_segs
+            result.append({"start": rel_start, "end": rel_end, "text": text})
+    return result

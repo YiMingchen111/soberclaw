@@ -2,13 +2,27 @@
 # ============================================================
 # SoberClaw 视频切片系统 - 服务器一键部署脚本
 # 适用于 Ubuntu 22.04 LTS
-# 用法: bash deploy.sh [ANTHROPIC_API_KEY]
+#
+# 用法（四选一）：
+#   Claude:   bash deploy.sh --claude   sk-ant-xxx
+#   豆包:     bash deploy.sh --doubao   "API_KEY" "ep-MODEL_ID"
+#   通义千问: bash deploy.sh --qwen     sk-xxx
+#   OpenAI:   bash deploy.sh --openai   sk-xxx
 # ============================================================
 set -e
 
 REPO_URL="https://github.com/yimingchen111/soberclaw"
 APP_DIR="/opt/soberclaw"
-API_KEY="${1:-}"
+
+# 解析参数
+PROVIDER="${1:-}"
+case "$PROVIDER" in
+  --claude)  ANTHROPIC_API_KEY="${2:-}"; shift 2 ;;
+  --doubao)  DOUBAO_API_KEY="${2:-}"; DOUBAO_MODEL="${3:-}"; shift 3 ;;
+  --qwen)    DASHSCOPE_API_KEY="${2:-}"; shift 2 ;;
+  --openai)  OPENAI_API_KEY="${2:-}"; OPENAI_BASE_URL="${3:-}"; shift 2 ;;
+  *)         ANTHROPIC_API_KEY="${1:-}"; shift 1 2>/dev/null || true ;;  # 兼容旧用法
+esac
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $1"; }
@@ -42,7 +56,14 @@ log "代码已准备：$APP_DIR"
 
 step "4/8  配置环境变量"
 cat > "$APP_DIR/.env" <<EOF
-ANTHROPIC_API_KEY=${API_KEY}
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+DOUBAO_API_KEY=${DOUBAO_API_KEY:-}
+DOUBAO_MODEL=${DOUBAO_MODEL:-}
+DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+DASHSCOPE_MODEL=${DASHSCOPE_MODEL:-qwen-plus}
+OPENAI_API_KEY=${OPENAI_API_KEY:-}
+OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
 NEXT_PUBLIC_API_URL=http://localhost:8000
 EOF
 log "环境变量已写入 .env"
