@@ -1,11 +1,11 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import toast from "react-hot-toast";
-import { Save, Plus, X, RefreshCw } from "lucide-react";
+import { Save, Plus, X, RefreshCw, Play, Square } from "lucide-react";
 import {
   getPreferences, updatePreferences,
   getSliceConfig, updateSliceConfig,
-  getVoices, getSubtitleStyles,
+  getVoices, getSubtitleStyles, getVoicePreviewUrl,
   type CreatorPreferences, type SliceConfig, type Voice,
 } from "@/lib/api";
 
@@ -97,6 +97,53 @@ const DEFAULT_VOICES: Voice[] = [
   { id: "zh-CN-YunjianNeural",  name: "云健（成熟男声）", gender: "male",   lang: "zh-CN" },
   { id: "zh-CN-XiaohanNeural",  name: "晓涵（知性女声）", gender: "female", lang: "zh-CN" },
 ];
+
+/* ── voice preview button ────────────────────────────────── */
+function VoicePreviewBtn({ voiceId }: { voiceId: string }) {
+  const [playing, setPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const toggle = () => {
+    if (playing) {
+      audioRef.current?.pause();
+      setPlaying(false);
+    } else {
+      const audio = new Audio(getVoicePreviewUrl(voiceId));
+      audioRef.current = audio;
+      audio.play().catch(() => toast.error("音色预览失败，请确认后端已启动"));
+      audio.onended = () => setPlaying(false);
+      audio.onerror = () => { setPlaying(false); toast.error("音色预览加载失败"); };
+      setPlaying(true);
+    }
+  };
+
+  useEffect(() => {
+    return () => { audioRef.current?.pause(); };
+  }, []);
+
+  // stop when voice changes
+  useEffect(() => {
+    audioRef.current?.pause();
+    setPlaying(false);
+  }, [voiceId]);
+
+  return (
+    <button
+      onClick={toggle}
+      title={playing ? "停止预览" : "试听音色"}
+      className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-all"
+      style={{
+        background: playing ? "var(--accent-dim)" : "var(--bg-2)",
+        color:      playing ? "var(--accent)"     : "var(--text-3)",
+        border:     `1px solid ${playing ? "var(--accent)" : "var(--border)"}`,
+        flexShrink: 0,
+      }}
+    >
+      {playing ? <Square size={10} /> : <Play size={10} />}
+      {playing ? "停止" : "试听"}
+    </button>
+  );
+}
 
 /* ── component ───────────────────────────────────────────── */
 export default function PreferencesPage() {
@@ -282,10 +329,13 @@ export default function PreferencesPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <Label>音色</Label>
-                  <select className="input" value={prefs.default_voice}
-                    onChange={e => setPrefs({ ...prefs, default_voice: e.target.value })}>
-                    {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-                  </select>
+                  <div className="flex gap-2 items-center">
+                    <select className="input flex-1" value={prefs.default_voice}
+                      onChange={e => setPrefs({ ...prefs, default_voice: e.target.value })}>
+                      {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                    </select>
+                    <VoicePreviewBtn voiceId={prefs.default_voice} />
+                  </div>
                 </div>
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
@@ -452,10 +502,13 @@ export default function PreferencesPage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label>音色</Label>
-                      <select className="input" value={config.dubbing_voice}
-                        onChange={e => setConfig({ ...config, dubbing_voice: e.target.value })}>
-                        {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-                      </select>
+                      <div className="flex gap-2 items-center">
+                        <select className="input flex-1" value={config.dubbing_voice}
+                          onChange={e => setConfig({ ...config, dubbing_voice: e.target.value })}>
+                          {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                        </select>
+                        <VoicePreviewBtn voiceId={config.dubbing_voice} />
+                      </div>
                     </div>
                     <div>
                       <div className="flex justify-between items-center mb-1.5">

@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
@@ -7,7 +7,7 @@ import {
   Upload, CheckCircle, Loader2, Sparkles,
   ArrowRight, Film, Type, Mic,
 } from "lucide-react";
-import { uploadVideo, analyzeVideo, createSliceJob, getPreferences, getSliceConfig } from "@/lib/api";
+import { uploadVideo, analyzeVideo, createSliceJob, getPreferences, getSliceConfig, getLogs, type LogEntry } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 type Step = "idle" | "uploading" | "transcribing" | "analyzing" | "done";
@@ -26,6 +26,25 @@ export default function HomePage() {
   const [step, setStep]         = useState<Step>("idle");
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState("");
+  const [logs, setLogs]         = useState<LogEntry[]>([]);
+  const logSinceRef             = useRef(0);
+  const logEndRef               = useRef<HTMLDivElement>(null);
+
+  // Poll logs while transcribing/analyzing
+  useEffect(() => {
+    if (step !== "transcribing" && step !== "analyzing") return;
+    const t = setInterval(async () => {
+      try {
+        const res = await getLogs(logSinceRef.current);
+        if (res.logs.length > 0) {
+          setLogs(prev => [...prev, ...res.logs]);
+          logSinceRef.current = res.total;
+          setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        }
+      } catch { /* ignore */ }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [step]);
 
   const onDrop = useCallback(async (files: File[]) => {
     const file = files[0];
@@ -33,6 +52,10 @@ export default function HomePage() {
     setFileName(file.name);
 
     try {
+      // reset logs
+      setLogs([]);
+      logSinceRef.current = 0;
+
       // 1. Upload
       setStep("uploading");
       const video = await uploadVideo(file, pct => setProgress(pct));
@@ -122,6 +145,9 @@ export default function HomePage() {
               <p className="text-sm" style={{ color: "var(--text-3)" }}>
                 支持 MP4 · MOV · AVI · MKV · WebM
               </p>
+              <p className="text-xs mt-2 px-3 py-1.5 rounded-lg" style={{ color: "var(--accent)", background: "var(--accent-dim)" }}>
+                推荐视频大小 500MB 以内 · 时长建议 3~30 分钟
+              </p>
             </>
           )}
 
@@ -139,9 +165,31 @@ export default function HomePage() {
                 </>
               )}
               {(step === "transcribing" || step === "analyzing") && (
-                <div className="dot-loader flex justify-center">
-                  <span /><span /><span />
-                </div>
+                <>
+                  <div className="dot-loader flex justify-center">
+                    <span /><span /><span />
+                  </div>
+                  {logs.length > 0 && (
+                    <div
+                      className="w-full text-left rounded-lg p-3 mt-2 overflow-y-auto"
+                      style={{
+                        background: "var(--bg-2)", border: "1px solid var(--border)",
+                        maxHeight: "120px", fontSize: "11px", fontFamily: "monospace",
+                      }}
+                    >
+                      {logs.map((l, i) => (
+                        <div key={i} style={{
+                          color: l.level === "error" ? "var(--red)" : l.level === "warn" ? "var(--yellow)" : "var(--text-3)",
+                          lineHeight: "1.6",
+                        }}>
+                          <span style={{ color: "var(--text-3)", marginRight: 6 }}>{l.ts}</span>
+                          {l.message}
+                        </div>
+                      ))}
+                      <div ref={logEndRef} />
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

@@ -184,6 +184,18 @@ export const exportSlices = (
     keep_original_audio,
   }).then(r => r.data);
 
+export interface LogEntry {
+  ts: string;
+  level: string;
+  message: string;
+}
+
+export const getLogs = (since = 0) =>
+  apiClient.get<{ logs: LogEntry[]; total: number }>(`/preferences/logs?since=${since}`).then(r => r.data);
+
+export const getVoicePreviewUrl = (voiceId: string) =>
+  `/api/preferences/voice-preview/${encodeURIComponent(voiceId)}`;
+
 export const formatDuration = (seconds: number): string => {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);

@@ -1,15 +1,15 @@
 "use client";
-import { useEffect, useState, useCallback, Suspense } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import {
-  Download, RefreshCw, Play, Pause, Check,
+  Download, RefreshCw, Play, Check,
   Star, Clock, Zap, Upload, CheckSquare,
   Square, ChevronDown, X,
 } from "lucide-react";
 import {
-  getJobStatus, exportSlices, getVoices, formatDuration,
-  type SliceJob, type SliceInfo, type Voice, type SubtitleStyleConfig,
+  getJobStatus, exportSlices, getVoices, getLogs, getVoicePreviewUrl, formatDuration,
+  type SliceJob, type SliceInfo, type Voice, type SubtitleStyleConfig, type LogEntry,
 } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
@@ -33,6 +33,37 @@ function scoreLabel(s: number) {
   if (s >= 0.8) return "精彩";
   if (s >= 0.6) return "不错";
   return "一般";
+}
+
+/* ── Voice preview button ────────────────────────────────── */
+function VoicePreviewBtn({ voiceId }: { voiceId: string }) {
+  const [playing, setPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const toggle = () => {
+    if (playing) { audioRef.current?.pause(); setPlaying(false); }
+    else {
+      const a = new Audio(getVoicePreviewUrl(voiceId));
+      audioRef.current = a;
+      a.play().catch(() => toast.error("音色预览失败"));
+      a.onended = () => setPlaying(false);
+      a.onerror = () => { setPlaying(false); };
+      setPlaying(true);
+    }
+  };
+  useEffect(() => () => { audioRef.current?.pause(); }, []);
+  useEffect(() => { audioRef.current?.pause(); setPlaying(false); }, [voiceId]);
+  return (
+    <button onClick={toggle}
+      className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-all flex-shrink-0"
+      style={{
+        background: playing ? "var(--accent-dim)" : "var(--bg-2)",
+        color:      playing ? "var(--accent)"     : "var(--text-3)",
+        border:     `1px solid ${playing ? "var(--accent)" : "var(--border)"}`,
+      }}>
+      {playing ? <Square size={9} /> : <Play size={9} />}
+      {playing ? "停止" : "试听"}
+    </button>
+  );
 }
 
 /* ── Export panel ────────────────────────────────────────── */
@@ -121,11 +152,14 @@ function ExportPanel({
             <div className="space-y-3">
               <div>
                 <p className="text-xs mb-1" style={{ color: "var(--text-3)" }}>音色</p>
-                <select className="input" style={{ fontSize: "13px", padding: "7px 10px" }}
-                  value={exportDubbingVoice}
-                  onChange={e => setExportDubbingVoice(e.target.value)}>
-                  {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-                </select>
+                <div className="flex gap-2 items-center">
+                  <select className="input flex-1" style={{ fontSize: "13px", padding: "7px 10px" }}
+                    value={exportDubbingVoice}
+                    onChange={e => setExportDubbingVoice(e.target.value)}>
+                    {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                  </select>
+                  <VoicePreviewBtn voiceId={exportDubbingVoice} />
+                </div>
               </div>
               <div>
                 <p className="text-xs mb-1" style={{ color: "var(--text-3)" }}>语速 {exportDubbingSpeed.toFixed(1)}x</p>
@@ -261,6 +295,10 @@ function SlicesContent() {
   const [voices,      setVoices]      = useState<Voice[]>([]);
   const [showExport,  setShowExport]  = useState(false);
   const [polling,     setPolling]     = useState(false);
+  const [logs,        setLogs]        = useState<LogEntry[]>([]);
+  const [showLogs,    setShowLogs]    = useState(false);
+  const logSinceRef                   = useRef(0);
+  const logEndRef                     = useRef<HTMLDivElement>(null);
 
   const loadJob = useCallback(async (id: string) => {
     setLoading(true);
@@ -283,6 +321,22 @@ function SlicesContent() {
     if (id) loadJob(id);
     getVoices().then(setVoices).catch(() => {});
   }, [jobIdParam, currentJob?.job_id, loadJob]);
+
+  // log polling while processing
+  useEffect(() => {
+    if (!polling) return;
+    const t = setInterval(async () => {
+      try {
+        const res = await getLogs(logSinceRef.current);
+        if (res.logs.length > 0) {
+          setLogs(prev => [...prev, ...res.logs]);
+          logSinceRef.current = res.total;
+          setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        }
+      } catch { /* ignore */ }
+    }, 1200);
+    return () => clearInterval(t);
+  }, [polling]);
 
   // polling
   useEffect(() => {
@@ -376,6 +430,37 @@ function SlicesContent() {
           )}
           {job.status === "failed" && (
             <span className="text-xs" style={{ color: "var(--red)" }}>{job.error}</span>
+          )}
+        </div>
+      )}
+
+      {/* Log panel */}
+      {logs.length > 0 && (
+        <div className="card mb-5 overflow-hidden">
+          <button
+            onClick={() => setShowLogs(!showLogs)}
+            className="w-full flex items-center justify-between px-4 py-3 text-xs"
+            style={{ color: "var(--text-3)" }}
+          >
+            <span>处理日志 ({logs.length} 条)</span>
+            <ChevronDown size={12} className={`transition-transform ${showLogs ? "rotate-180" : ""}`} />
+          </button>
+          {showLogs && (
+            <div
+              className="px-4 pb-3 overflow-y-auto"
+              style={{ maxHeight: "180px", fontFamily: "monospace", fontSize: "11px" }}
+            >
+              {logs.map((l, i) => (
+                <div key={i} style={{
+                  color: l.level === "error" ? "var(--red)" : l.level === "warn" ? "var(--yellow)" : "var(--text-3)",
+                  lineHeight: "1.7",
+                }}>
+                  <span style={{ color: "var(--text-3)", marginRight: 6 }}>{l.ts}</span>
+                  {l.message}
+                </div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
           )}
         </div>
       )}

@@ -1,8 +1,11 @@
 """
 用户偏好设置路由
 """
-from fastapi import APIRouter
+import asyncio
+from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 from models.schemas import CreatorPreferences, SliceConfig, AVAILABLE_VOICES
+from utils.log_buffer import get_logs, clear_logs
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
@@ -86,6 +89,51 @@ async def list_subtitle_styles():
             "preview": "neon",
         },
     ]
+
+
+@router.get("/logs")
+async def get_processing_logs(since: int = Query(0, ge=0)):
+    """获取处理日志（轮询接口，since 为上次读取的条数偏移）"""
+    logs = get_logs(since)
+    return {"logs": logs, "total": since + len(logs)}
+
+
+@router.delete("/logs")
+async def clear_processing_logs():
+    """清空日志缓冲区"""
+    clear_logs()
+    return {"ok": True}
+
+
+@router.get("/voice-preview/{voice_id}")
+async def preview_voice(voice_id: str):
+    """生成指定音色的试听音频（edge-tts）"""
+    try:
+        import edge_tts  # noqa: PLC0415
+    except ImportError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=501, detail="edge-tts 未安装")
+
+    # 找到该音色的语言决定试听文本
+    voice_map = {v["id"]: v for v in AVAILABLE_VOICES}
+    voice = voice_map.get(voice_id)
+    if not voice:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="音色不存在")
+
+    sample_text = "你好，这是试听音频，感谢使用视频切片系统。" if "zh" in voice_id.lower() or "Chinese" in voice.get("name", "") else "Hello, this is a voice preview. Thank you for using the video slicing system."
+
+    async def audio_generator():
+        communicate = edge_tts.Communicate(text=sample_text, voice=voice_id)
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                yield chunk["data"]
+
+    return StreamingResponse(
+        audio_generator(),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.get("/platforms")
