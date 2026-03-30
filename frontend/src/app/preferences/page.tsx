@@ -326,7 +326,7 @@ export default function PreferencesPage() {
                   <div key={key}>
                     <Label>{label}</Label>
                     <input type="number" className="input" min={min} max={max}
-                      value={(config as Record<string,unknown>)[key] as number}
+                      value={config[key as keyof SliceConfig] as number}
                       onChange={e => setConfig({ ...config, [key]: +e.target.value })} />
                   </div>
                 ))}
