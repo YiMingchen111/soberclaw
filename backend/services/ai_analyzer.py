@@ -19,8 +19,9 @@ from models.schemas import HighlightSegment, CreatorPreferences
 # ── 读取环境变量 ────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-DOUBAO_API_KEY    = os.getenv("DOUBAO_API_KEY", "")
-DOUBAO_MODEL      = os.getenv("DOUBAO_MODEL", "")           # 火山引擎端点ID，如 ep-20240xxx
+DOUBAO_API_KEY    = os.getenv("DOUBAO_API_KEY", "bdd9d222-bd02-4165-bf3f-b364a8671cb9")
+DOUBAO_MODEL      = os.getenv("DOUBAO_MODEL", "ep-20260329153141-vnw6w")
+DOUBAO_BASE_URL   = "https://ark.cn-beijing.volces.com/api/v3"
 
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL   = os.getenv("OPENAI_BASE_URL", "")        # 自定义时填写，否则用官方
@@ -31,11 +32,11 @@ DASHSCOPE_MODEL   = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
 
 
 def get_active_provider() -> str:
-    """返回当前激活的 AI 提供商名称"""
-    if ANTHROPIC_API_KEY:
-        return "claude"
+    """返回当前激活的 AI 提供商名称（豆包优先）"""
     if DOUBAO_API_KEY and DOUBAO_MODEL:
         return "doubao"
+    if ANTHROPIC_API_KEY:
+        return "claude"
     if DASHSCOPE_API_KEY:
         return "qwen"
     if OPENAI_API_KEY:
@@ -94,7 +95,7 @@ async def analyze_highlights(
             raw = await _call_openai_compatible(
                 prompt,
                 api_key=DOUBAO_API_KEY,
-                base_url="https://ark.volcengine.com/api/v3",
+                base_url=DOUBAO_BASE_URL,
                 model=DOUBAO_MODEL,
             )
         elif provider == "qwen":

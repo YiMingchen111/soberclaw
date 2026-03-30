@@ -3,467 +3,241 @@ import { useEffect, useState, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import {
-  Film, Download, RefreshCw, Check, Play,
-  Mic, Type, Zap, Star, Clock, ChevronDown,
-  CheckSquare, Square, X, Settings,
+  Download, RefreshCw, Play, Pause, Check,
+  Star, Clock, Zap, Upload, CheckSquare,
+  Square, ChevronDown, X,
 } from "lucide-react";
 import {
-  getJobStatus, exportSlices, getVoices, getSubtitleStyles,
-  formatDuration,
-  type SliceJob, type SliceInfo, type Voice,
+  getJobStatus, exportSlices, getVoices, formatDuration,
+  type SliceJob, type SliceInfo, type Voice, type SubtitleStyleConfig,
 } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
-const SUBTITLE_STYLES = [
-  { id: "classic",  name: "经典白字",  color: "#ffffff" },
-  { id: "karaoke",  name: "卡拉OK",    color: "#ffff00" },
-  { id: "gradient", name: "彩色渐变",  color: "#ff88ff" },
-  { id: "minimal",  name: "简约条形",  color: "#000000" },
-  { id: "bounce",   name: "弹跳动画",  color: "#ffffff" },
-  { id: "neon",     name: "霓虹发光",  color: "#00ffff" },
+/* ── constants ───────────────────────────────────────────── */
+const SUBTITLE_OPTIONS = [
+  { id: "classic",  label: "经典白字" },
+  { id: "karaoke",  label: "卡拉 OK" },
+  { id: "gradient", label: "彩色渐变" },
+  { id: "minimal",  label: "简约条形" },
+  { id: "bounce",   label: "弹跳动画" },
+  { id: "neon",     label: "霓虹发光" },
 ];
 
-const SUBTITLE_POSITIONS = [
-  { id: "bottom", label: "底部" },
-  { id: "center", label: "居中" },
-  { id: "top",    label: "顶部" },
-];
+/* ── score helper ────────────────────────────────────────── */
+function scoreStyle(s: number) {
+  if (s >= 0.8) return { color: "var(--green)" };
+  if (s >= 0.6) return { color: "var(--yellow)" };
+  return { color: "var(--red)" };
+}
+function scoreLabel(s: number) {
+  if (s >= 0.8) return "精彩";
+  if (s >= 0.6) return "不错";
+  return "一般";
+}
 
-function SlicesPageContent() {
-  const searchParams = useSearchParams();
-  const jobIdFromUrl = searchParams.get("job");
-
-  const {
-    currentJob, setCurrentJob,
-    selectedSlices, toggleSliceSelection, selectAllSlices, clearSelection,
-    exportSubtitleConfig, setExportSubtitleConfig,
-    exportDubbing, setExportDubbing,
-    exportDubbingVoice, setExportDubbingVoice,
-    exportDubbingSpeed, setExportDubbingSpeed,
-  } = useAppStore();
-
-  const [job, setJob] = useState<SliceJob | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [pollingJobId, setPollingJobId] = useState<string | null>(null);
+/* ── Export panel ────────────────────────────────────────── */
+function ExportPanel({
+  job, voices, selected, onSelectAll, onClearAll,
+  onClose,
+}: {
+  job: SliceJob;
+  voices: Voice[];
+  selected: Set<number>;
+  onSelectAll: () => void;
+  onClearAll: () => void;
+  onClose: () => void;
+}) {
+  const { exportSubtitleConfig, setExportSubtitleConfig,
+          exportDubbing, setExportDubbing,
+          exportDubbingVoice, setExportDubbingVoice,
+          exportDubbingSpeed, setExportDubbingSpeed } = useAppStore();
   const [exporting, setExporting] = useState(false);
-  const [voices, setVoices] = useState<Voice[]>([]);
-  const [showExportPanel, setShowExportPanel] = useState(false);
-  const [playingSlice, setPlayingSlice] = useState<number | null>(null);
 
-  // Load job
-  const loadJob = useCallback(async (id: string) => {
-    setLoading(true);
-    try {
-      const j = await getJobStatus(id);
-      setJob(j);
-      setCurrentJob(j);
-      if (j.status === "processing" || j.status === "pending") {
-        setPollingJobId(id);
-      } else {
-        setPollingJobId(null);
-      }
-    } catch {
-      toast.error("获取任务状态失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [setCurrentJob]);
-
-  // Initial load
-  useEffect(() => {
-    const id = jobIdFromUrl || currentJob?.job_id;
-    if (id) loadJob(id);
-    getVoices().then(setVoices).catch(() => {});
-  }, [jobIdFromUrl, currentJob?.job_id, loadJob]);
-
-  // Polling
-  useEffect(() => {
-    if (!pollingJobId) return;
-    const timer = setInterval(async () => {
-      try {
-        const j = await getJobStatus(pollingJobId);
-        setJob(j);
-        setCurrentJob(j);
-        if (j.status === "done" || j.status === "failed") {
-          setPollingJobId(null);
-          if (j.status === "done") {
-            toast.success(`切片完成！共 ${j.slices.length} 个片段`);
-            selectAllSlices(j.slices.length);
-          }
-        }
-      } catch {
-        setPollingJobId(null);
-      }
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [pollingJobId, setCurrentJob, selectAllSlices]);
-
-  const handleExport = async () => {
-    if (!job || selectedSlices.size === 0) return;
+  const doExport = async () => {
+    if (selected.size === 0) { toast.error("请先选择切片"); return; }
     setExporting(true);
     try {
       await exportSlices(
-        job.job_id,
-        Array.from(selectedSlices),
-        exportSubtitleConfig,
-        exportDubbing,
-        exportDubbingVoice,
-        exportDubbingSpeed,
-        true,
+        job.job_id, Array.from(selected), exportSubtitleConfig,
+        exportDubbing, exportDubbingVoice, exportDubbingSpeed, true,
       );
-      toast.success("导出任务已提交！文件将在后台生成");
-    } catch {
-      toast.error("导出失败");
-    } finally {
-      setExporting(false);
-    }
+      toast.success("导出任务已提交，文件在后台生成");
+    } catch { toast.error("导出失败"); }
+    finally { setExporting(false); }
   };
-
-  const scoreColor = (score: number) => {
-    if (score >= 0.8) return "text-green-400";
-    if (score >= 0.6) return "text-yellow-400";
-    return "text-red-400";
-  };
-
-  const scoreLabel = (score: number) => {
-    if (score >= 0.8) return "精彩";
-    if (score >= 0.6) return "不错";
-    return "一般";
-  };
-
-  if (!job && !loading) {
-    return (
-      <div className="max-w-5xl mx-auto px-4 py-16 text-center">
-        <div className="w-20 h-20 rounded-2xl mx-auto mb-6 flex items-center justify-center"
-          style={{ background: "rgba(204,63,247,.15)" }}>
-          <Film size={36} className="text-brand-400" />
-        </div>
-        <h2 className="text-2xl font-bold mb-3">暂无切片任务</h2>
-        <p className="text-[#9090b8] mb-8">请先上传视频并完成 AI 分析</p>
-        <a href="/" className="btn-brand inline-flex items-center gap-2 py-3 px-8">
-          上传视频
-        </a>
-      </div>
-    );
-  }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
+    <div className="card p-5 mb-5 slide-up" style={{ borderColor: "rgba(251,146,60,.2)" }}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold" style={{ color: "var(--text-1)" }}>导出设置</h3>
+        <button onClick={onClose}><X size={15} style={{ color: "var(--text-3)" }} /></button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-6">
+        {/* subtitle */}
         <div>
-          <h1 className="text-2xl font-bold">切片管理</h1>
-          <p className="text-[#9090b8] text-sm mt-1">
-            任务 ID: {job?.job_id?.slice(0, 8)}...
-          </p>
+          <p className="text-xs mb-2" style={{ color: "var(--text-3)", fontWeight: 500 }}>字幕样式</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {SUBTITLE_OPTIONS.map(s => (
+              <button key={s.id}
+                onClick={() => setExportSubtitleConfig({ ...exportSubtitleConfig, style: s.id })}
+                className="py-1.5 px-2 rounded-lg text-xs transition-all"
+                style={{
+                  background: exportSubtitleConfig.style === s.id ? "var(--accent-dim)" : "var(--bg-2)",
+                  color:      exportSubtitleConfig.style === s.id ? "var(--accent)" : "var(--text-2)",
+                  border:     `1px solid ${exportSubtitleConfig.style === s.id ? "var(--accent)" : "var(--border)"}`,
+                }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <div>
+              <p className="text-xs mb-1" style={{ color: "var(--text-3)" }}>位置</p>
+              <select className="input" style={{ fontSize: "13px", padding: "7px 10px" }}
+                value={exportSubtitleConfig.position}
+                onChange={e => setExportSubtitleConfig({ ...exportSubtitleConfig, position: e.target.value })}>
+                <option value="bottom">底部</option>
+                <option value="center">居中</option>
+                <option value="top">顶部</option>
+              </select>
+            </div>
+            <div>
+              <p className="text-xs mb-1" style={{ color: "var(--text-3)" }}>字号 {exportSubtitleConfig.font_size}px</p>
+              <input type="range" min="18" max="80" step="2" className="w-full mt-2"
+                value={exportSubtitleConfig.font_size}
+                onChange={e => setExportSubtitleConfig({ ...exportSubtitleConfig, font_size: +e.target.value })} />
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button onClick={() => job && loadJob(job.job_id)}
-            disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-[#9090b8] hover:text-white transition-colors"
-            style={{ background: "rgba(255,255,255,.05)" }}>
-            <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
-            刷新
-          </button>
-
-          {job?.status === "done" && job.slices.length > 0 && (
-            <button
-              onClick={() => setShowExportPanel(!showExportPanel)}
-              className="btn-brand flex items-center gap-2 py-2">
-              <Download size={16} /> 导出切片
-              <ChevronDown size={14} className={`transition-transform ${showExportPanel ? "rotate-180" : ""}`} />
-            </button>
+        {/* dubbing */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs" style={{ color: "var(--text-3)", fontWeight: 500 }}>配音</p>
+            <div className={`toggle ${exportDubbing ? "on" : ""}`} onClick={() => setExportDubbing(!exportDubbing)} />
+          </div>
+          {exportDubbing && (
+            <div className="space-y-3">
+              <div>
+                <p className="text-xs mb-1" style={{ color: "var(--text-3)" }}>音色</p>
+                <select className="input" style={{ fontSize: "13px", padding: "7px 10px" }}
+                  value={exportDubbingVoice}
+                  onChange={e => setExportDubbingVoice(e.target.value)}>
+                  {voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <p className="text-xs mb-1" style={{ color: "var(--text-3)" }}>语速 {exportDubbingSpeed.toFixed(1)}x</p>
+                <input type="range" min="0.5" max="2" step="0.1" className="w-full"
+                  value={exportDubbingSpeed}
+                  onChange={e => setExportDubbingSpeed(+e.target.value)} />
+              </div>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Status bar */}
-      {job && (
-        <div className="glass-card p-5 mb-6">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className={`w-3 h-3 rounded-full ${
-                job.status === "done"       ? "bg-green-400" :
-                job.status === "failed"     ? "bg-red-400" :
-                job.status === "processing" ? "bg-yellow-400 animate-pulse" :
-                "bg-[#9090b8]"
-              }`} />
-              <span className="font-medium">
-                {job.status === "done"       ? "切片完成" :
-                 job.status === "failed"     ? "切片失败" :
-                 job.status === "processing" ? "切片处理中..." :
-                 "等待处理"}
-              </span>
-              {job.status === "done" && (
-                <span className="text-sm text-[#9090b8]">共 {job.slices.length} 个片段</span>
-              )}
-            </div>
-
-            {(job.status === "processing" || job.status === "pending") && (
-              <div className="flex items-center gap-3 flex-1 max-w-xs">
-                <div className="progress-bar flex-1">
-                  <div className="progress-fill" style={{ width: `${job.progress}%` }} />
-                </div>
-                <span className="text-sm text-[#9090b8]">{job.progress}%</span>
-              </div>
-            )}
-
-            {job.status === "failed" && (
-              <span className="text-sm text-red-400">{job.error}</span>
-            )}
-          </div>
+      {/* bottom bar */}
+      <div className="divider mt-5 mb-4" />
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button onClick={onSelectAll} className="flex items-center gap-1 text-xs" style={{ color: "var(--accent)" }}>
+            <CheckSquare size={13} /> 全选
+          </button>
+          <button onClick={onClearAll} className="flex items-center gap-1 text-xs" style={{ color: "var(--text-3)" }}>
+            <Square size={13} /> 清空
+          </button>
+          <span className="text-xs" style={{ color: "var(--text-3)" }}>
+            已选 {selected.size} / {job.slices.length}
+          </span>
         </div>
-      )}
-
-      {/* Export panel */}
-      {showExportPanel && job?.status === "done" && (
-        <div className="glass-card p-6 mb-6 animate-slide-up">
-          <h3 className="font-semibold mb-5 flex items-center gap-2">
-            <Settings size={16} className="text-brand-400" /> 导出设置
-          </h3>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Subtitle config */}
-            <div className="space-y-4">
-              <h4 className="text-sm font-medium flex items-center gap-2">
-                <Type size={14} className="text-brand-400" /> 字幕样式
-              </h4>
-              <div className="grid grid-cols-3 gap-2">
-                {SUBTITLE_STYLES.map(s => (
-                  <button key={s.id}
-                    onClick={() => setExportSubtitleConfig({ ...exportSubtitleConfig, style: s.id })}
-                    className={`p-3 rounded-xl text-xs font-medium text-center transition-all
-                      ${exportSubtitleConfig.style === s.id ? "" : "opacity-60 hover:opacity-100"}`}
-                    style={{
-                      background: exportSubtitleConfig.style === s.id ? "rgba(204,63,247,.25)" : "rgba(255,255,255,.04)",
-                      border: `2px solid ${exportSubtitleConfig.style === s.id ? "#cc3ff7" : "rgba(255,255,255,.08)"}`,
-                    }}>
-                    <div className="w-4 h-4 rounded-full mx-auto mb-1.5" style={{ background: s.color }} />
-                    {s.name}
-                  </button>
-                ))}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-[#9090b8] mb-1 block">位置</label>
-                  <select className="input-dark text-sm" value={exportSubtitleConfig.position}
-                    onChange={e => setExportSubtitleConfig({ ...exportSubtitleConfig, position: e.target.value })}>
-                    {SUBTITLE_POSITIONS.map(p => (
-                      <option key={p.id} value={p.id}>{p.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-[#9090b8] mb-1 block">
-                    字号 ({exportSubtitleConfig.font_size}px)
-                  </label>
-                  <input type="range" min="18" max="80" step="2"
-                    value={exportSubtitleConfig.font_size}
-                    onChange={e => setExportSubtitleConfig({ ...exportSubtitleConfig, font_size: +e.target.value })}
-                    className="w-full accent-brand-500 mt-2" />
-                </div>
-              </div>
-            </div>
-
-            {/* Dubbing config */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h4 className="text-sm font-medium flex items-center gap-2">
-                  <Mic size={14} className="text-brand-400" /> 配音
-                </h4>
-                <div className={`w-10 h-6 rounded-full transition-colors cursor-pointer ${exportDubbing ? "bg-brand-500" : "bg-[#3a3a6a]"}`}
-                  onClick={() => setExportDubbing(!exportDubbing)}>
-                  <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${exportDubbing ? "translate-x-5" : "translate-x-1"}`} />
-                </div>
-              </div>
-
-              {exportDubbing && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-xs text-[#9090b8] mb-1 block">音色</label>
-                    <select className="input-dark text-sm" value={exportDubbingVoice}
-                      onChange={e => setExportDubbingVoice(e.target.value)}>
-                      {voices.map(v => (
-                        <option key={v.id} value={v.id}>{v.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-[#9090b8] mb-1 block">
-                      语速 ({exportDubbingSpeed.toFixed(1)}x)
-                    </label>
-                    <input type="range" min="0.5" max="2" step="0.1"
-                      value={exportDubbingSpeed}
-                      onChange={e => setExportDubbingSpeed(+e.target.value)}
-                      className="w-full accent-brand-500" />
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Selection summary + export button */}
-          <div className="flex flex-wrap items-center justify-between gap-4 mt-6 pt-5 border-t border-[#2a2a4a]">
-            <div className="flex items-center gap-3">
-              <button onClick={() => selectAllSlices(job.slices.length)}
-                className="text-sm text-brand-400 hover:text-brand-300 transition-colors flex items-center gap-1">
-                <CheckSquare size={14} /> 全选
-              </button>
-              <button onClick={clearSelection}
-                className="text-sm text-[#9090b8] hover:text-white transition-colors flex items-center gap-1">
-                <Square size={14} /> 清空
-              </button>
-              <span className="text-sm text-[#9090b8]">
-                已选 {selectedSlices.size} / {job.slices.length} 个
-              </span>
-            </div>
-
-            <button onClick={handleExport}
-              disabled={exporting || selectedSlices.size === 0}
-              className="btn-brand flex items-center gap-2">
-              <Download size={16} />
-              {exporting ? "导出中..." : `导出 ${selectedSlices.size} 个切片`}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Slices grid */}
-      {job?.status === "done" && job.slices.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {job.slices.map((slice, idx) => (
-            <SliceCard
-              key={idx}
-              slice={slice}
-              jobId={job.job_id}
-              index={idx}
-              selected={selectedSlices.has(idx)}
-              onToggle={() => toggleSliceSelection(idx)}
-              playing={playingSlice === idx}
-              onPlayToggle={() => setPlayingSlice(playingSlice === idx ? null : idx)}
-              scoreColor={scoreColor}
-              scoreLabel={scoreLabel}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Processing skeleton */}
-      {(job?.status === "processing" || job?.status === "pending") && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="slice-card">
-              <div className="aspect-[9/16] bg-[#1a1a3a] animate-pulse" />
-              <div className="p-4 space-y-3">
-                <div className="h-4 bg-[#2a2a4a] rounded animate-pulse" />
-                <div className="h-4 bg-[#2a2a4a] rounded w-2/3 animate-pulse" />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+        <button onClick={doExport} disabled={exporting || selected.size === 0}
+          className="btn btn-primary text-sm py-2">
+          <Download size={14} />
+          {exporting ? "导出中..." : `导出 ${selected.size} 个切片`}
+        </button>
+      </div>
     </div>
   );
 }
 
-function SliceCard({
-  slice, jobId, index, selected, onToggle, playing, onPlayToggle,
-  scoreColor, scoreLabel,
-}: {
-  slice: SliceInfo;
-  jobId: string;
-  index: number;
-  selected: boolean;
-  onToggle: () => void;
-  playing: boolean;
-  onPlayToggle: () => void;
-  scoreColor: (s: number) => string;
-  scoreLabel: (s: number) => string;
+/* ── Slice card ──────────────────────────────────────────── */
+function SliceCard({ slice, jobId, index, selected, onToggle }: {
+  slice: SliceInfo; jobId: string; index: number;
+  selected: boolean; onToggle: () => void;
 }) {
-  const thumbUrl = `/api/slices/thumbnail/${jobId}/${index}`;
+  const [playing, setPlaying] = useState(false);
   const previewUrl = `/api/slices/preview/${jobId}/${index}`;
+  const thumbUrl   = `/api/slices/thumbnail/${jobId}/${index}`;
 
   return (
-    <div className={`slice-card ${selected ? "selected" : ""}`}
-      style={{ cursor: "default" }}>
-      {/* Thumbnail / Video */}
-      <div className="aspect-video relative overflow-hidden bg-[#111128]"
-        style={{ aspectRatio: "9/16", maxHeight: "300px" }}>
-        {playing ? (
-          <video
-            src={previewUrl}
-            autoPlay
-            controls
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="relative group w-full h-full">
-            <img
-              src={thumbUrl}
-              alt={`切片 ${index + 1}`}
-              className="w-full h-full object-cover"
-              onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
-            />
-            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-              style={{ background: "rgba(0,0,0,.5)" }}>
-              <button onClick={onPlayToggle}
-                className="w-12 h-12 rounded-full flex items-center justify-center"
-                style={{ background: "rgba(204,63,247,.8)" }}>
-                <Play size={20} className="text-white ml-1" />
-              </button>
+    <div className={`slice-card ${selected ? "selected" : ""}`}>
+      {/* media */}
+      <div className="relative overflow-hidden bg-[#111]" style={{ aspectRatio: "9/16", maxHeight: "280px" }}>
+        {playing
+          ? <video src={previewUrl} autoPlay controls className="w-full h-full object-cover" />
+          : (
+            <div className="relative w-full h-full group">
+              <img src={thumbUrl} alt="" className="w-full h-full object-cover"
+                onError={e => { (e.target as HTMLImageElement).style.opacity = "0"; }} />
+              {/* play overlay */}
+              <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ background: "rgba(0,0,0,.5)" }}>
+                <button onClick={() => setPlaying(true)}
+                  className="w-10 h-10 rounded-full flex items-center justify-center"
+                  style={{ background: "var(--accent)" }}>
+                  <Play size={16} className="text-black ml-0.5" />
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          )
+        }
 
-        {/* Score badge */}
-        <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold"
-          style={{ background: "rgba(0,0,0,.7)" }}>
-          <Star size={10} className={scoreColor(slice.score)} />
-          <span className={scoreColor(slice.score)}>{scoreLabel(slice.score)}</span>
-          <span className="text-[#9090b8]">{(slice.score * 100).toFixed(0)}分</span>
+        {/* score badge */}
+        <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full text-xs"
+          style={{ background: "rgba(0,0,0,.75)" }}>
+          <Star size={9} style={scoreStyle(slice.score)} />
+          <span style={scoreStyle(slice.score)}>{scoreLabel(slice.score)}</span>
+          <span style={{ color: "var(--text-3)" }}>{Math.round(slice.score * 100)}</span>
         </div>
 
-        {/* Select checkbox */}
+        {/* select */}
         <button onClick={onToggle}
-          className="absolute top-2 right-2 w-7 h-7 rounded-lg flex items-center justify-center transition-all"
+          className="absolute top-2 right-2 w-6 h-6 rounded-md flex items-center justify-center transition-all"
           style={{
-            background: selected ? "#cc3ff7" : "rgba(0,0,0,.6)",
-            border: `2px solid ${selected ? "#cc3ff7" : "rgba(255,255,255,.3)"}`,
+            background: selected ? "var(--accent)" : "rgba(0,0,0,.6)",
+            border: `1.5px solid ${selected ? "var(--accent)" : "rgba(255,255,255,.3)"}`,
           }}>
-          {selected && <Check size={14} className="text-white" />}
+          {selected && <Check size={12} className="text-black font-bold" />}
         </button>
       </div>
 
-      {/* Info */}
-      <div className="p-4 space-y-3">
+      {/* info */}
+      <div className="p-3 space-y-2">
         <div className="flex items-center justify-between">
-          <span className="font-semibold text-sm">片段 {index + 1}</span>
-          <span className="text-xs text-[#9090b8] flex items-center gap-1">
-            <Clock size={11} /> {formatDuration(slice.duration)}
+          <span className="text-sm font-medium" style={{ color: "var(--text-1)" }}>片段 {index + 1}</span>
+          <span className="text-xs flex items-center gap-1" style={{ color: "var(--text-3)" }}>
+            <Clock size={10} />{formatDuration(slice.duration)}
           </span>
         </div>
-
-        <div className="text-xs text-[#9090b8] flex items-center gap-2">
-          <Zap size={11} className="text-brand-400" />
-          {slice.reason}
+        <div className="flex items-center gap-1 text-xs" style={{ color: "var(--text-3)" }}>
+          <Zap size={10} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <span className="truncate">{slice.reason}</span>
         </div>
-
         {slice.transcript && (
-          <p className="text-xs text-[#9090b8] line-clamp-2 leading-relaxed">
+          <p className="text-xs leading-relaxed line-clamp-2" style={{ color: "var(--text-3)" }}>
             {slice.transcript}
           </p>
         )}
-
-        <div className="flex items-center justify-between text-xs text-[#9090b8]">
-          <span>{formatDuration(slice.start)} → {formatDuration(slice.end)}</span>
-          <a
-            href={`/api/slices/download/slice_${index.toString().padStart(2, "0")}.mp4`}
-            download
-            className="flex items-center gap-1 text-brand-400 hover:text-brand-300 transition-colors"
-            onClick={e => e.stopPropagation()}>
-            <Download size={11} /> 下载
+        <div className="flex items-center justify-between pt-1" style={{ borderTop: "1px solid var(--border)" }}>
+          <span className="text-xs" style={{ color: "var(--text-3)" }}>
+            {formatDuration(slice.start)} → {formatDuration(slice.end)}
+          </span>
+          <a href={previewUrl} download
+            className="flex items-center gap-1 text-xs no-underline"
+            style={{ color: "var(--accent)" }}>
+            <Download size={10} /> 下载
           </a>
         </div>
       </div>
@@ -471,10 +245,191 @@ function SliceCard({
   );
 }
 
+/* ── Main content ─────────────────────────────────────────── */
+function SlicesContent() {
+  const params     = useSearchParams();
+  const jobIdParam = params.get("job");
+
+  const {
+    currentJob, setCurrentJob,
+    selectedSlices, toggleSliceSelection, selectAllSlices, clearSelection,
+    exportSubtitleConfig,
+  } = useAppStore();
+
+  const [job,         setJob]         = useState<SliceJob | null>(null);
+  const [loading,     setLoading]     = useState(false);
+  const [voices,      setVoices]      = useState<Voice[]>([]);
+  const [showExport,  setShowExport]  = useState(false);
+  const [polling,     setPolling]     = useState(false);
+
+  const loadJob = useCallback(async (id: string) => {
+    setLoading(true);
+    try {
+      const j = await getJobStatus(id);
+      setJob(j);
+      setCurrentJob(j);
+      if (j.status === "processing" || j.status === "pending") setPolling(true);
+      else setPolling(false);
+    } catch {
+      toast.error("获取任务状态失败，请检查后端是否运行");
+    } finally {
+      setLoading(false);
+    }
+  }, [setCurrentJob]);
+
+  // initial load
+  useEffect(() => {
+    const id = jobIdParam ?? currentJob?.job_id;
+    if (id) loadJob(id);
+    getVoices().then(setVoices).catch(() => {});
+  }, [jobIdParam, currentJob?.job_id, loadJob]);
+
+  // polling
+  useEffect(() => {
+    if (!polling || !job) return;
+    const t = setInterval(async () => {
+      try {
+        const j = await getJobStatus(job.job_id);
+        setJob(j); setCurrentJob(j);
+        if (j.status === "done") {
+          setPolling(false);
+          toast.success(`✅ 切片完成，共 ${j.slices.length} 个片段`);
+          selectAllSlices(j.slices.length);
+        } else if (j.status === "failed") {
+          setPolling(false);
+          toast.error("切片处理失败：" + j.error);
+        }
+      } catch { setPolling(false); }
+    }, 2500);
+    return () => clearInterval(t);
+  }, [polling, job, setCurrentJob, selectAllSlices]);
+
+  /* empty state */
+  if (!job && !loading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+        <div
+          className="w-16 h-16 rounded-2xl flex items-center justify-center mb-5"
+          style={{ background: "var(--bg-2)" }}
+        >
+          <Upload size={28} style={{ color: "var(--text-3)" }} />
+        </div>
+        <h2 className="text-lg font-semibold mb-2" style={{ color: "var(--text-1)" }}>暂无切片任务</h2>
+        <p className="text-sm mb-6" style={{ color: "var(--text-3)" }}>请先上传视频，AI 分析后自动跳转到此页面</p>
+        <a href="/" className="btn btn-primary no-underline">上传视频</a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-8">
+
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div>
+          <h1 className="text-xl font-bold" style={{ color: "var(--text-1)" }}>切片管理</h1>
+          {job && (
+            <p className="text-xs mt-0.5" style={{ color: "var(--text-3)" }}>
+              任务 {job.job_id.slice(0, 8)}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => job && loadJob(job.job_id)} disabled={loading}
+            className="btn btn-secondary text-xs">
+            <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> 刷新
+          </button>
+          {job?.status === "done" && job.slices.length > 0 && (
+            <button
+              onClick={() => setShowExport(!showExport)}
+              className="btn btn-primary text-xs"
+            >
+              <Download size={13} /> 导出切片
+              <ChevronDown size={12} className={`transition-transform ${showExport ? "rotate-180" : ""}`} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Status */}
+      {job && (
+        <div className="card p-4 mb-5 flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${
+              job.status === "done"       ? "bg-green-400" :
+              job.status === "failed"     ? "bg-red-400" :
+              job.status === "processing" ? "bg-yellow-400 animate-pulse" : "bg-stone-500"
+            }`} />
+            <span className="text-sm font-medium" style={{ color: "var(--text-1)" }}>
+              {job.status === "done"       ? `切片完成 · ${job.slices.length} 个片段` :
+               job.status === "failed"     ? "切片失败" :
+               job.status === "processing" ? "处理中..." : "等待处理"}
+            </span>
+          </div>
+          {(job.status === "processing" || job.status === "pending") && (
+            <div className="flex items-center gap-2 flex-1 max-w-xs">
+              <div className="progress-track flex-1">
+                <div className="progress-fill" style={{ width: `${job.progress}%` }} />
+              </div>
+              <span className="text-xs" style={{ color: "var(--text-3)" }}>{job.progress}%</span>
+            </div>
+          )}
+          {job.status === "failed" && (
+            <span className="text-xs" style={{ color: "var(--red)" }}>{job.error}</span>
+          )}
+        </div>
+      )}
+
+      {/* Export panel */}
+      {showExport && job?.status === "done" && (
+        <ExportPanel
+          job={job} voices={voices}
+          selected={selectedSlices}
+          onSelectAll={() => selectAllSlices(job.slices.length)}
+          onClearAll={clearSelection}
+          onClose={() => setShowExport(false)}
+        />
+      )}
+
+      {/* Slices grid */}
+      {job?.status === "done" && job.slices.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+          {job.slices.map((slice, i) => (
+            <SliceCard key={i} slice={slice} jobId={job.job_id}
+              index={i} selected={selectedSlices.has(i)}
+              onToggle={() => toggleSliceSelection(i)} />
+          ))}
+        </div>
+      )}
+
+      {/* Skeleton while processing */}
+      {(job?.status === "processing" || job?.status === "pending") && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="card overflow-hidden">
+              <div className="skeleton" style={{ aspectRatio: "9/16", maxHeight: "280px" }} />
+              <div className="p-3 space-y-2">
+                <div className="skeleton h-3 w-3/4" />
+                <div className="skeleton h-3 w-1/2" />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SlicesPage() {
   return (
-    <Suspense fallback={<div className="flex items-center justify-center min-h-[60vh] text-[#9090b8]">加载中...</div>}>
-      <SlicesPageContent />
-    </Suspense>
+    <div className="min-h-screen pt-14">
+      <Suspense fallback={
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <RefreshCw size={20} className="animate-spin" style={{ color: "var(--text-3)" }} />
+        </div>
+      }>
+        <SlicesContent />
+      </Suspense>
+    </div>
   );
 }
